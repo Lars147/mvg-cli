@@ -52,6 +52,20 @@ TRANSPORT_EMOJIS = {
     "TRAM": "🚋",
     "BAHN": "🚆",
     "REGIONAL_BUS": "🚍",
+    "RUFTAXI": "🚕",
+    "PEDESTRIAN": "🚶",
+}
+
+# All transport types for filtering
+ALL_TRANSPORT_TYPES = ["UBAHN", "SBAHN", "BUS", "TRAM", "BAHN", "REGIONAL_BUS", "RUFTAXI"]
+TRANSPORT_TYPE_MAP = {
+    "ubahn": "UBAHN", "u-bahn": "UBAHN",
+    "sbahn": "SBAHN", "s-bahn": "SBAHN",
+    "bus": "BUS",
+    "tram": "TRAM",
+    "bahn": "BAHN", "re": "BAHN", "rb": "BAHN", "regional": "BAHN",
+    "regionalbus": "REGIONAL_BUS",
+    "ruftaxi": "RUFTAXI", "rufbus": "RUFTAXI",
 }
 
 # Default location (Lars' position in Munich)
@@ -587,18 +601,7 @@ def handle_departures(args) -> int:
         # Parse transport types filter
         transport_types = None
         if args.type:
-            type_map = {
-                "ubahn": "UBAHN",
-                "sbahn": "SBAHN", 
-                "bus": "BUS",
-                "tram": "TRAM",
-                "bahn": "BAHN",
-            }
-            transport_types = []
-            for t in args.type.split(","):
-                mapped = type_map.get(t.strip().lower())
-                if mapped:
-                    transport_types.append(mapped)
+            transport_types = [TRANSPORT_TYPE_MAP[t.strip().lower()] for t in args.type.split(",") if t.strip().lower() in TRANSPORT_TYPE_MAP]
         
         departures = api.get_departures(
             global_id,
@@ -699,15 +702,13 @@ def handle_route(args) -> int:
                 return EXIT_ERROR
         
         # Parse transport type filters
-        ALL_TYPES = ["UBAHN", "SBAHN", "BUS", "TRAM", "BAHN"]
-        type_map = {"ubahn": "UBAHN", "sbahn": "SBAHN", "bus": "BUS", "tram": "TRAM", "bahn": "BAHN"}
         transport_types = None
         
         if args.type:
-            transport_types = [type_map[t.strip().lower()] for t in args.type.split(",") if t.strip().lower() in type_map]
+            transport_types = [TRANSPORT_TYPE_MAP[t.strip().lower()] for t in args.type.split(",") if t.strip().lower() in TRANSPORT_TYPE_MAP]
         elif args.exclude:
-            excluded = {type_map[t.strip().lower()] for t in args.exclude.split(",") if t.strip().lower() in type_map}
-            transport_types = [t for t in ALL_TYPES if t not in excluded]
+            excluded = {TRANSPORT_TYPE_MAP[t.strip().lower()] for t in args.exclude.split(",") if t.strip().lower() in TRANSPORT_TYPE_MAP}
+            transport_types = [t for t in ALL_TRANSPORT_TYPES if t not in excluded]
         
         # Map CLI options to API params
         mode_map = {"fast": "FAST", "less-changes": "LESS_CHANGES", "less-walking": "LESS_WALKING"}
@@ -910,14 +911,7 @@ def handle_lines(args) -> int:
         # Parse transport type filter
         transport_type = None
         if args.type:
-            type_map = {
-                "ubahn": "UBAHN",
-                "sbahn": "SBAHN",
-                "bus": "BUS", 
-                "tram": "TRAM",
-                "bahn": "BAHN",
-            }
-            transport_type = type_map.get(args.type.lower())
+            transport_type = TRANSPORT_TYPE_MAP.get(args.type.lower())
             if not transport_type:
                 error = f"Unbekannter Verkehrsmitteltyp: {args.type}"
                 if args.json:
