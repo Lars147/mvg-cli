@@ -579,9 +579,12 @@ def handle_live(args) -> int:
     try:
         api = SBahnLiveAPI()
         
-        print("🔄 Verbinde mit S-Bahn Live Map...", end="", flush=True)
+        is_json = args.json or getattr(args, 'live_json', False)
+        if not is_json:
+            print("🔄 Verbinde mit S-Bahn Live Map...", end="", flush=True)
         trajectories = api.fetch_trajectories(timeout=12)
-        print(f" {len(trajectories)} Züge empfangen.")
+        if not is_json:
+            print(f" {len(trajectories)} Züge empfangen.")
         
         if not trajectories:
             print("❌ Keine S-Bahn-Daten empfangen")
