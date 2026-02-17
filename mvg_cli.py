@@ -19,6 +19,9 @@ Nutzung:
     mvg alerts --station "Marienplatz"          # Stationsspezifische Störungen
     mvg lines                                    # Alle Linien
     mvg lines --type ubahn                       # Nur U-Bahn Linien
+    mvg live                                     # Alle S-Bahnen live
+    mvg live --line S3                           # Nur S3 anzeigen
+    mvg live --line S8 --json                    # JSON-Ausgabe
 
 Alle Commands unterstützen --json für JSON-Ausgabe.
 """
@@ -37,6 +40,9 @@ import re
 
 # Configuration
 BASE_URL = "https://www.mvg.de/api/bgw-pt/v3"
+GEOPS_WS_URL = "wss://api.geops.io/realtime-ws/v1/"
+GEOPS_API_KEY = "5cc87b12d7c5370001c1d655112ec5c21e0f441792cfc2fafe3e7a1e"
+GEOPS_ORIGIN = "https://s-bahn-muenchen-live.de"
 SESSION_FILE = Path.home() / ".mvg_session.json"
 
 # Exit codes
@@ -385,6 +391,279 @@ class MVGAPI:
         
         # Return best match (first result)
         return stations[0].get("globalId")
+
+
+class SBahnLiveAPI:
+    """S-Bahn München Live Tracking via geOps WebSocket API."""
+
+    # S-Bahn line colors for terminal display
+    LINE_COLORS = {
+        "S1": "\033[94m",   # Blue
+        "S2": "\033[92m",   # Green
+        "S3": "\033[95m",   # Purple
+        "S4": "\033[91m",   # Red
+        "S6": "\033[32m",   # Dark Green
+        "S7": "\033[91m",   # Red (brown-ish)
+        "S8": "\033[93m",   # Yellow/Orange
+        "S20": "\033[35m",  # Magenta
+    }
+    RESET = "\033[0m"
+
+    # Known S-Bahn München station names by approximate coordinate (EPSG:3857)
+    # Used for resolving nearest station from trajectory coordinates
+    STATIONS = {
+        "Hauptbahnhof": (1288239, 6133745),
+        "Marienplatz": (1289702, 6133330),
+        "Isartor": (1290526, 6133225),
+        "Rosenheimer Platz": (1291105, 6133047),
+        "Ostbahnhof": (1292158, 6132944),
+        "Leuchtenbergring": (1293233, 6133003),
+        "Donnersbergerbrücke": (1287007, 6133850),
+        "Hackerbrücke": (1287718, 6133801),
+        "Karlsplatz (Stachus)": (1288704, 6133546),
+        "Pasing": (1281748, 6133844),
+        "Laim": (1283811, 6133894),
+        "Hirschgarten": (1285067, 6133862),
+    }
+
+    def fetch_trajectories(self, timeout: int = 15) -> list:
+        """Fetch all S-Bahn trajectories via WebSocket.
+
+        Uses subprocess + node for reliable WebSocket handling.
+        Falls back to stdlib if node unavailable.
+        """
+        import subprocess
+        import tempfile
+
+        js_code = """
+// Try multiple locations for ws module
+const paths = [
+  process.env.HOME + '/.openclaw/workspace/node_modules/ws',
+  '/app/node_modules/.pnpm/ws@8.19.0/node_modules/ws',
+];
+let WebSocket;
+for (const p of paths) {
+  try { WebSocket = require(p); break; } catch(e) {}
+}
+if (!WebSocket) { try { WebSocket = require('ws'); } catch(e) { process.stderr.write('ws module not found'); process.exit(1); } }
+const url = process.argv[2];
+const origin = process.argv[3];
+const waitMs = parseInt(process.argv[4]) || 8000;
+const ws = new WebSocket(url, { headers: { Origin: origin } });
+const trains = [];
+ws.on('open', () => {
+  ws.send('GET sbm_full');
+  ws.send('SUB sbm_full');
+  ws.send('BBOX 1268000 6110000 1350000 6200000 14');
+});
+ws.on('message', (raw) => {
+  try {
+    const d = JSON.parse(raw.toString());
+    if (d.source === 'trajectory' && d.content?.properties) {
+      trains.push(d.content);
+    }
+  } catch(e) {}
+});
+ws.on('error', (e) => { process.stderr.write('ERR: ' + e.message + '\\n'); });
+const outFile = process.argv[5];
+setTimeout(() => {
+  ws.close();
+  require('fs').writeFileSync(outFile, JSON.stringify(trains));
+  process.exit(0);
+}, waitMs);
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+            f.write(js_code)
+            js_path = f.name
+
+        try:
+            url = f"{GEOPS_WS_URL}?key={GEOPS_API_KEY}"
+            out_file = js_path + ".json"
+            result = subprocess.run(
+                ["node", js_path, url, GEOPS_ORIGIN, str((timeout - 2) * 1000), out_file],
+                capture_output=True, text=True, timeout=timeout
+            )
+            if result.returncode != 0:
+                raise ConnectionError(f"Node process failed: {result.stderr}")
+            import os as _os2
+            if _os2.path.exists(out_file):
+                with open(out_file) as f:
+                    data = json.load(f)
+                _os2.unlink(out_file)
+                return data
+            return []
+        except FileNotFoundError:
+            raise ConnectionError("node not found — required for S-Bahn live tracking")
+        finally:
+            import os as _os
+            try:
+                _os.unlink(js_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _nearest_station(coord, stations) -> str:
+        """Find nearest known station to a coordinate."""
+        if not stations:
+            return "Unbekannt"
+        x, y = coord
+        best = None
+        best_dist = float("inf")
+        for name, (sx, sy) in stations.items():
+            d = (x - sx) ** 2 + (y - sy) ** 2
+            if d < best_dist:
+                best_dist = d
+                best = name
+        return best or "Unbekannt"
+
+    def parse_trajectories(self, trajectories: list) -> list:
+        """Parse raw trajectory data into clean train info."""
+        trains = []
+
+        for traj in trajectories:
+            props = traj.get("properties", {})
+            line_info = props.get("line")
+            if not line_info:
+                continue
+
+            line_name = line_info.get("name", "")
+            # Skip non-S-Bahn (e.g. BusS2 replacement buses)
+            if line_name and not line_name.startswith("S"):
+                continue
+
+            state = props.get("state", "UNKNOWN")
+            delay = props.get("delay")
+            train_number = props.get("train_number")
+
+            # Get current position from first coordinate
+            coords = traj.get("geometry", {}).get("coordinates", [])
+            current_pos = coords[0] if coords else None
+
+            # Delay is in milliseconds
+            delay_min = None
+            if delay is not None:
+                delay_min = round(delay / 60000)
+
+            # Route identifier sometimes contains destination info
+            route_id = props.get("route_identifier", "")
+
+            train = {
+                "line": line_name,
+                "color": line_info.get("color", ""),
+                "trainNumber": train_number,
+                "state": state,
+                "delayMinutes": delay_min,
+                "routeId": route_id,
+                "position": current_pos,
+                "hasRealtime": props.get("has_realtime", False),
+                "trainId": props.get("train_id", ""),
+                "timestamp": props.get("timestamp", 0),
+            }
+            trains.append(train)
+
+        # Deduplicate: keep latest update per train_id
+        by_id = {}
+        for t in trains:
+            tid = t["trainId"]
+            if tid not in by_id or t["timestamp"] > by_id[tid]["timestamp"]:
+                by_id[tid] = t
+        trains = list(by_id.values())
+
+        # Sort by line name, then train number
+        trains.sort(key=lambda t: (t["line"], t.get("trainNumber") or 0))
+        return trains
+
+
+def handle_live(args) -> int:
+    """Handle S-Bahn live tracking command."""
+    try:
+        api = SBahnLiveAPI()
+        
+        print("🔄 Verbinde mit S-Bahn Live Map...", end="", flush=True)
+        trajectories = api.fetch_trajectories(timeout=12)
+        print(f" {len(trajectories)} Züge empfangen.")
+        
+        if not trajectories:
+            print("❌ Keine S-Bahn-Daten empfangen")
+            return EXIT_ERROR
+
+        trains = api.parse_trajectories(trajectories)
+
+        # Filter by line if requested
+        if args.line:
+            line_filter = args.line.upper()
+            if not line_filter.startswith("S"):
+                line_filter = "S" + line_filter
+            trains = [t for t in trains if t["line"] == line_filter]
+            if not trains:
+                print(f"❌ Keine Züge der Linie {line_filter} gefunden")
+                return EXIT_ERROR
+
+        if args.json or getattr(args, 'live_json', False):
+            print(json.dumps(trains, indent=2, ensure_ascii=False))
+            return EXIT_OK
+
+        # Group by line
+        by_line = {}
+        for t in trains:
+            by_line.setdefault(t["line"], []).append(t)
+
+        print()
+        for line_name in sorted(by_line.keys()):
+            line_trains = by_line[line_name]
+            color = SBahnLiveAPI.LINE_COLORS.get(line_name, "")
+            reset = SBahnLiveAPI.RESET if color else ""
+
+            print(f"  {color}━━━ {line_name} ({len(line_trains)} Züge) ━━━{reset}")
+
+            for t in line_trains:
+                # State emoji
+                state_map = {
+                    "DRIVING": "🚆",
+                    "BOARDING": "🚏",
+                    "STOPPED": "⏸️",
+                }
+                state_emoji = state_map.get(t["state"], "❓")
+
+                # Delay
+                delay_str = ""
+                if t["delayMinutes"] is not None and t["delayMinutes"] > 0:
+                    delay_str = f" \033[91m+{t['delayMinutes']}min{reset}"
+                elif t["delayMinutes"] is not None and t["delayMinutes"] == 0:
+                    delay_str = " ✅"
+
+                number = f"#{t['trainNumber']}" if t["trainNumber"] else ""
+                rt = " 📡" if t.get("hasRealtime") else ""
+
+                info = f"  {state_emoji} {color}{line_name}{reset}"
+                if number:
+                    info += f" {number}"
+                info += f"  [{t['state']}]"
+                info += delay_str
+                info += rt
+
+                print(info)
+
+            print()
+
+        # Summary
+        total = len(trains)
+        delayed = sum(1 for t in trains if t["delayMinutes"] and t["delayMinutes"] > 0)
+        driving = sum(1 for t in trains if t["state"] == "DRIVING")
+        print(f"  📊 {total} Züge aktiv | {driving} fahren | {delayed} verspätet")
+        print()
+
+        return EXIT_OK
+
+    except ConnectionError as e:
+        print(f"\n❌ Verbindungsfehler: {e}")
+        return EXIT_API_ERROR
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"\n❌ Fehler: {e}")
+        return EXIT_ERROR
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1054,6 +1333,11 @@ def create_parser() -> argparse.ArgumentParser:
     lines_parser = subparsers.add_parser("lines", help="Linien auflisten")
     lines_parser.add_argument("--type", help="Verkehrsmittel-Filter (ubahn, sbahn, bus, tram, bahn)")
     
+    # Live S-Bahn tracking command
+    live_parser = subparsers.add_parser("live", help="S-Bahn München Live-Tracking")
+    live_parser.add_argument("--line", help="Nur bestimmte Linie (z.B. S3, S8)")
+    live_parser.add_argument("--json", action="store_true", dest="live_json", help="JSON-Ausgabe")
+    
     return parser
 
 
@@ -1074,6 +1358,7 @@ def main() -> int:
         "nearby": handle_nearby,
         "alerts": handle_alerts,
         "lines": handle_lines,
+        "live": handle_live,
     }
     
     handler = handlers.get(args.command)
