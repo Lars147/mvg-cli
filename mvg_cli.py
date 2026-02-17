@@ -210,23 +210,43 @@ class MVGAPI:
         for route in response:
             parts = []
             for part in route.get("parts", []):
+                from_info = part.get("from", {})
+                to_info = part.get("to", {})
                 part_info = {
                     "from": {
-                        "name": part.get("from", {}).get("name"),
-                        "departure": part.get("from", {}).get("plannedDeparture"),
+                        "name": from_info.get("name"),
+                        "departure": from_info.get("plannedDeparture"),
+                        "departureDelayInMinutes": from_info.get("departureDelayInMinutes", 0),
+                        "platform": from_info.get("platform"),
+                        "platformChanged": from_info.get("platformChanged", False),
                     },
                     "to": {
-                        "name": part.get("to", {}).get("name"),
-                        "arrival": part.get("to", {}).get("plannedArrival"),
+                        "name": to_info.get("name"),
+                        "arrival": to_info.get("plannedDeparture"),  # API uses plannedDeparture for arrival too
+                        "arrivalDelayInMinutes": to_info.get("arrivalDelayInMinutes", 0),
                     },
                     "line": part.get("line"),
                 }
                 parts.append(part_info)
             
+            # Calculate departure/arrival/duration from first and last part
+            route_departure = parts[0]["from"]["departure"] if parts else None
+            route_arrival = parts[-1]["to"]["arrival"] if parts else None
+            route_duration = None
+            if route_departure and route_arrival:
+                try:
+                    from datetime import datetime
+                    fmt = "%Y-%m-%dT%H:%M:%S%z"
+                    dep_dt = datetime.strptime(route_departure, fmt)
+                    arr_dt = datetime.strptime(route_arrival, fmt)
+                    route_duration = int((arr_dt - dep_dt).total_seconds() / 60)
+                except (ValueError, TypeError):
+                    pass
+
             route_info = {
-                "departure": route.get("departure"),
-                "arrival": route.get("arrival"),
-                "duration": route.get("duration"),
+                "departure": route_departure,
+                "arrival": route_arrival,
+                "duration": route_duration,
                 "parts": parts,
             }
             routes.append(route_info)
@@ -677,17 +697,7 @@ def handle_route(args) -> int:
             
             departure = format_time_iso(route_departure) if route_departure else "N/A"
             arrival = format_time_iso(route_arrival) if route_arrival else "N/A"
-            
-            # Calculate duration from times if not provided
-            duration_seconds = route.get("duration", 0) or 0
-            if not duration_seconds and route_departure and route_arrival:
-                try:
-                    dep_dt = datetime.fromisoformat(route_departure.replace('Z', '+00:00'))
-                    arr_dt = datetime.fromisoformat(route_arrival.replace('Z', '+00:00'))
-                    duration_seconds = int((arr_dt - dep_dt).total_seconds())
-                except:
-                    duration_seconds = 0
-            duration = duration_seconds // 60  # Convert to minutes
+            duration = route.get("duration") or 0
             
             content = [f"Abfahrt: {departure} → Ankunft: {arrival} (Dauer: {duration} min)"]
             content.append("")
