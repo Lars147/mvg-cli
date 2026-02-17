@@ -67,7 +67,7 @@ python3 mvg_cli.py route "Marienplatz" "Garching" --time "18:00"
 
 ### Stationen in der Nähe
 ```bash
-python3 mvg_cli.py nearby                    # Default: Lars' Position
+python3 mvg_cli.py nearby                    # Default: München
 python3 mvg_cli.py nearby 48.1351 11.5820    # Bestimmte Koordinaten
 ```
 
