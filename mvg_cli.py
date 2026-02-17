@@ -203,7 +203,8 @@ class MVGAPI:
         origin: Dict[str, Any],
         destination: Dict[str, Any],
         is_arrival_time: bool = False,
-        departure_time: Optional[str] = None
+        departure_time: Optional[str] = None,
+        transport_types: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """Find routes between two locations (stations or addresses)."""
         params = {}
@@ -227,6 +228,9 @@ class MVGAPI:
         
         if departure_time:
             params["routingDateTime"] = departure_time
+        
+        if transport_types:
+            params["transportTypes"] = ",".join(transport_types)
         
         response = self._make_request("/routes", params)
         routes = []
@@ -682,11 +686,23 @@ def handle_route(args) -> int:
                     print(f"❌ {error}")
                 return EXIT_ERROR
         
+        # Parse transport type filters
+        ALL_TYPES = ["UBAHN", "SBAHN", "BUS", "TRAM", "BAHN"]
+        type_map = {"ubahn": "UBAHN", "sbahn": "SBAHN", "bus": "BUS", "tram": "TRAM", "bahn": "BAHN"}
+        transport_types = None
+        
+        if args.type:
+            transport_types = [type_map[t.strip().lower()] for t in args.type.split(",") if t.strip().lower() in type_map]
+        elif args.exclude:
+            excluded = {type_map[t.strip().lower()] for t in args.exclude.split(",") if t.strip().lower() in type_map}
+            transport_types = [t for t in ALL_TYPES if t not in excluded]
+        
         routes = api.find_routes(
             origin_loc,
             destination_loc,
             is_arrival_time=args.arrive,
-            departure_time=departure_time
+            departure_time=departure_time,
+            transport_types=transport_types
         )
         
         if args.json:
@@ -980,6 +996,8 @@ def create_parser() -> argparse.ArgumentParser:
     route_parser.add_argument("destination", help="Ziel-Station")
     route_parser.add_argument("--arrive", action="store_true", help="Zeit als Ankunftszeit verwenden")
     route_parser.add_argument("--time", help="Bestimmte Zeit (HH:MM)")
+    route_parser.add_argument("--type", help="Nur bestimmte Verkehrsmittel (z.B. ubahn,sbahn)")
+    route_parser.add_argument("--exclude", help="Verkehrsmittel ausschließen (z.B. bus,tram)")
     
     # Nearby command
     nearby_parser = subparsers.add_parser("nearby", help="Nächste Stationen")
