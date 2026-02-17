@@ -204,7 +204,10 @@ class MVGAPI:
         destination: Dict[str, Any],
         is_arrival_time: bool = False,
         departure_time: Optional[str] = None,
-        transport_types: Optional[List[str]] = None
+        transport_types: Optional[List[str]] = None,
+        routing_mode: str = "FAST",
+        walk_speed: str = "NORMAL",
+        accessible: bool = False
     ) -> List[Dict[str, Any]]:
         """Find routes between two locations (stations or addresses)."""
         params = {}
@@ -231,6 +234,15 @@ class MVGAPI:
         
         if transport_types:
             params["transportTypes"] = ",".join(transport_types)
+        
+        if routing_mode != "FAST":
+            params["routingMode"] = routing_mode
+        
+        if walk_speed != "NORMAL":
+            params["walkSpeed"] = walk_speed
+        
+        if accessible:
+            params["wheelchair"] = "true"
         
         response = self._make_request("/routes", params)
         routes = []
@@ -697,12 +709,19 @@ def handle_route(args) -> int:
             excluded = {type_map[t.strip().lower()] for t in args.exclude.split(",") if t.strip().lower() in type_map}
             transport_types = [t for t in ALL_TYPES if t not in excluded]
         
+        # Map CLI options to API params
+        mode_map = {"fast": "FAST", "less-changes": "LESS_CHANGES", "less-walking": "LESS_WALKING"}
+        speed_map = {"slow": "SLOW", "normal": "NORMAL", "fast": "FAST"}
+        
         routes = api.find_routes(
             origin_loc,
             destination_loc,
             is_arrival_time=args.arrive,
             departure_time=departure_time,
-            transport_types=transport_types
+            transport_types=transport_types,
+            routing_mode=mode_map.get(args.mode, "FAST"),
+            walk_speed=speed_map.get(args.walk_speed, "NORMAL"),
+            accessible=args.accessible
         )
         
         if args.json:
@@ -998,6 +1017,12 @@ def create_parser() -> argparse.ArgumentParser:
     route_parser.add_argument("--time", help="Bestimmte Zeit (HH:MM)")
     route_parser.add_argument("--type", help="Nur bestimmte Verkehrsmittel (z.B. ubahn,sbahn)")
     route_parser.add_argument("--exclude", help="Verkehrsmittel ausschließen (z.B. bus,tram)")
+    route_parser.add_argument("--mode", choices=["fast", "less-changes", "less-walking"],
+                              default="fast", help="Suchmodus (default: fast)")
+    route_parser.add_argument("--walk-speed", choices=["slow", "normal", "fast"],
+                              default="normal", help="Lauftempo (default: normal)")
+    route_parser.add_argument("--accessible", action="store_true",
+                              help="Nur rollstuhlgerechte Verbindungen")
     
     # Nearby command
     nearby_parser = subparsers.add_parser("nearby", help="Nächste Stationen")
