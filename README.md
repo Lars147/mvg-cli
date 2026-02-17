@@ -11,6 +11,15 @@ Eine inoffizielle Command-Line-Interface für die Münchner Verkehrsgesellschaft
 - ⚠️ **Störungsmeldungen** - Aktuelle Betriebsstörungen
 - 🚊 **Linienübersicht** - Alle verfügbaren Linien nach Verkehrsmittel
 
+## Quickstart
+
+```bash
+# With uvx (recommended) — runs instantly without installation
+uvx --from git+https://github.com/Lars147/mvg-cli mvg search "Marienplatz"
+uvx --from git+https://github.com/Lars147/mvg-cli mvg departures "Marienplatz"
+uvx --from git+https://github.com/Lars147/mvg-cli mvg route "Marienplatz" "Garching"
+```
+
 ## Installation
 
 ```bash
