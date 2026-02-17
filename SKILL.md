@@ -47,19 +47,6 @@ mvg live --line S3                             # specific line
 
 All commands support `--json` for machine-readable output.
 
-## S8 Live Check Script
-
-`scripts/s8_check.py` — Specialized script showing next S8 trains approaching Daglfing with ETA.
-
-```bash
-python3 <skill_dir>/scripts/s8_check.py
-```
-
-Output: JSON with `inbound` (→ Herrsching/Innenstadt) and `outbound` (→ Flughafen) arrays.
-Each entry: `train` (number), `at` (current station), `eta` (minutes to Daglfing), `delay`, `state`, `direction`.
-
-Customize the target station by editing `S8_STATIONS_INBOUND` and `MINUTES_TO_DAGLFING_*` in the script.
-
 ## Transport Type Filters
 
 Use with `--type` or `--exclude`: `ubahn`, `sbahn`, `bus`, `tram`, `bahn` (RE/RB), `regionalbus`, `ruftaxi`
