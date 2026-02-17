@@ -185,18 +185,41 @@ class MVGAPI:
         
         return departures
     
+    def resolve_location(self, query: str) -> Dict[str, Any]:
+        """Resolve a query to a location (station or address).
+        
+        Returns dict with either 'globalId' (station) or 'latitude'/'longitude' (address).
+        Accepts stations, addresses, and POIs.
+        """
+        params = {"query": query}
+        locations = self._make_request("/locations", params)
+        if not locations:
+            return {}
+        return locations[0]
+
     def find_routes(
         self,
-        origin_global_id: str,
-        destination_global_id: str,
+        origin: Dict[str, Any],
+        destination: Dict[str, Any],
         is_arrival_time: bool = False,
         departure_time: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Find routes between two stations."""
-        params = {
-            "originStationGlobalId": origin_global_id,
-            "destinationStationGlobalId": destination_global_id,
-        }
+        """Find routes between two locations (stations or addresses)."""
+        params = {}
+        
+        # Origin: station (globalId) or address (lat/lon)
+        if origin.get("globalId"):
+            params["originStationGlobalId"] = origin["globalId"]
+        else:
+            params["originLatitude"] = origin["latitude"]
+            params["originLongitude"] = origin["longitude"]
+        
+        # Destination: station (globalId) or address (lat/lon)
+        if destination.get("globalId"):
+            params["destinationStationGlobalId"] = destination["globalId"]
+        else:
+            params["destinationLatitude"] = destination["latitude"]
+            params["destinationLongitude"] = destination["longitude"]
         
         if is_arrival_time:
             params["routingDateTimeIsArrival"] = "true"
@@ -623,19 +646,19 @@ def handle_route(args) -> int:
     try:
         api = MVGAPI()
         
-        # Resolve station names
-        origin_id = api.resolve_station(args.origin)
-        if not origin_id:
-            error = f"Start-Station '{args.origin}' nicht gefunden"
+        # Resolve locations (stations or addresses)
+        origin_loc = api.resolve_location(args.origin)
+        if not origin_loc:
+            error = f"Start '{args.origin}' nicht gefunden"
             if args.json:
                 print(json.dumps({"error": error}, indent=2))
             else:
                 print(f"❌ {error}")
             return EXIT_ERROR
         
-        destination_id = api.resolve_station(args.destination)
-        if not destination_id:
-            error = f"Ziel-Station '{args.destination}' nicht gefunden"
+        destination_loc = api.resolve_location(args.destination)
+        if not destination_loc:
+            error = f"Ziel '{args.destination}' nicht gefunden"
             if args.json:
                 print(json.dumps({"error": error}, indent=2))
             else:
@@ -662,8 +685,8 @@ def handle_route(args) -> int:
                 return EXIT_ERROR
         
         routes = api.find_routes(
-            origin_id,
-            destination_id,
+            origin_loc,
+            destination_loc,
             is_arrival_time=args.arrive,
             departure_time=departure_time
         )
