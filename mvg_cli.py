@@ -1,0 +1,1007 @@
+#!/usr/bin/env python3
+"""MVG CLI - Münchner Verkehrsgesellschaft vom Terminal aus.
+
+Inoffizielle CLI für die MVG API.
+Rein Python, keine externen Dependencies (nur stdlib + requests).
+
+Nutzung:
+    mvg search "Marienplatz"                     # Station suchen
+    mvg departures "Marienplatz"                 # Nächste Abfahrten
+    mvg departures "Marienplatz" --limit 20      # Mit Limit
+    mvg departures "Marienplatz" --type ubahn    # Nur U-Bahn
+    mvg departures "Marienplatz" --offset 5      # +5min Fußweg
+    mvg route "Marienplatz" "Garching"           # Verbindungssuche  
+    mvg route "Marienplatz" "Garching" --arrive  # Ankunftszeit
+    mvg route "Marienplatz" "Garching" --time "18:00"  # Bestimmte Zeit
+    mvg nearby                                   # Nächste Stationen (Default: Lars' Position)
+    mvg nearby 48.1351 11.5820                   # Bestimmte Koordinaten
+    mvg alerts                                   # Aktuelle Störungen
+    mvg alerts --station "Marienplatz"          # Stationsspezifische Störungen
+    mvg lines                                    # Alle Linien
+    mvg lines --type ubahn                       # Nur U-Bahn Linien
+
+Alle Commands unterstützen --json für JSON-Ausgabe.
+"""
+
+import argparse
+import json
+import sys
+import urllib.request
+import urllib.parse
+import urllib.error
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional, Dict, List
+import re
+
+
+# Configuration
+BASE_URL = "https://www.mvg.de/api/bgw-pt/v3"
+SESSION_FILE = Path.home() / ".mvg_session.json"
+
+# Exit codes
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_API_ERROR = 2
+
+# Transport type emojis
+TRANSPORT_EMOJIS = {
+    "UBAHN": "🔵",
+    "SBAHN": "🟢", 
+    "BUS": "🚌",
+    "TRAM": "🚋",
+    "BAHN": "🚆",
+    "REGIONAL_BUS": "🚍",
+}
+
+# Default location (Lars' position in Munich)
+DEFAULT_LAT = 48.1351
+DEFAULT_LON = 11.5820
+
+
+class MVGAPIError(Exception):
+    """Custom exception for MVG API errors."""
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
+class MVGAPI:
+    """MVG.de API client using only Python stdlib + requests."""
+    
+    def __init__(self):
+        self.session: Dict[str, Any] = {}
+        self._load_session()
+    
+    def _get_headers(self) -> Dict[str, str]:
+        """Get default HTTP headers."""
+        return {
+            "User-Agent": "mvg-cli/1.0 (Python stdlib)",
+            "Accept": "application/json",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+        }
+    
+    def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        """Make HTTP request to MVG API."""
+        url = f"{BASE_URL}{endpoint}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        
+        headers = self._get_headers()
+        request = urllib.request.Request(url, headers=headers)
+        
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                content = response.read().decode("utf-8")
+                if content:
+                    return json.loads(content)
+                return {}
+        except urllib.error.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8")
+            except:
+                pass
+            raise MVGAPIError(f"HTTP {e.code}: {e.reason}. {error_body}", e.code)
+        except urllib.error.URLError as e:
+            raise MVGAPIError(f"Verbindungsfehler: {e.reason}")
+        except json.JSONDecodeError as e:
+            raise MVGAPIError(f"Ungültige JSON-Antwort: {e}")
+    
+    def _save_session(self) -> None:
+        """Save session data to file."""
+        with open(SESSION_FILE, "w") as f:
+            json.dump(self.session, f, ensure_ascii=False, indent=2)
+    
+    def _load_session(self) -> None:
+        """Load session data from file."""
+        if SESSION_FILE.exists():
+            try:
+                with open(SESSION_FILE) as f:
+                    self.session = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                self.session = {}
+    
+    def search_stations(self, query: str) -> List[Dict[str, Any]]:
+        """Search for stations by name."""
+        params = {"query": query}
+        response = self._make_request("/locations", params)
+        
+        stations = []
+        for location in response:
+            if location.get("type") == "STATION":
+                stations.append({
+                    "globalId": location.get("globalId"),
+                    "name": location.get("name"),
+                    "place": location.get("place"),
+                    "transportTypes": location.get("transportTypes", []),
+                    "latitude": location.get("latitude"),
+                    "longitude": location.get("longitude"),
+                })
+        
+        return stations
+    
+    def get_departures(
+        self,
+        global_id: str,
+        limit: int = 10,
+        transport_types: Optional[List[str]] = None,
+        offset_minutes: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get departures for a station."""
+        params = {
+            "globalId": global_id,
+            "limit": str(limit),
+        }
+        
+        if offset_minutes > 0:
+            params["offsetInMinutes"] = str(offset_minutes)
+        
+        response = self._make_request("/departures", params)
+        departures = []
+        
+        for dep in response:
+            transport_type = dep.get("transportType")
+            if transport_types and transport_type not in transport_types:
+                continue
+            
+            planned_time = dep.get("plannedDepartureTime")
+            realtime_time = dep.get("realtimeDepartureTime")
+            delay_minutes = dep.get("delayInMinutes", 0)
+            
+            departure = {
+                "label": dep.get("label"),
+                "transportType": transport_type,
+                "destination": dep.get("destination"),
+                "plannedTime": planned_time,
+                "realtimeTime": realtime_time,
+                "delayMinutes": delay_minutes,
+                "cancelled": dep.get("cancelled", False),
+                "platform": dep.get("platform"),
+                "platformChanged": dep.get("platformChanged", False),
+                "infos": dep.get("infos", []),
+            }
+            departures.append(departure)
+        
+        return departures
+    
+    def find_routes(
+        self,
+        origin_global_id: str,
+        destination_global_id: str,
+        is_arrival_time: bool = False,
+        departure_time: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Find routes between two stations."""
+        params = {
+            "originStationGlobalId": origin_global_id,
+            "destinationStationGlobalId": destination_global_id,
+        }
+        
+        if is_arrival_time:
+            params["routingDateTimeIsArrival"] = "true"
+        
+        if departure_time:
+            params["routingDateTime"] = departure_time
+        
+        response = self._make_request("/routes", params)
+        routes = []
+        
+        for route in response:
+            parts = []
+            for part in route.get("parts", []):
+                part_info = {
+                    "from": {
+                        "name": part.get("from", {}).get("name"),
+                        "departure": part.get("from", {}).get("plannedDeparture"),
+                    },
+                    "to": {
+                        "name": part.get("to", {}).get("name"),
+                        "arrival": part.get("to", {}).get("plannedArrival"),
+                    },
+                    "line": part.get("line"),
+                }
+                parts.append(part_info)
+            
+            route_info = {
+                "departure": route.get("departure"),
+                "arrival": route.get("arrival"),
+                "duration": route.get("duration"),
+                "parts": parts,
+            }
+            routes.append(route_info)
+        
+        return routes
+    
+    def get_nearby_stations(self, latitude: float, longitude: float) -> List[Dict[str, Any]]:
+        """Get stations near given coordinates."""
+        # Use location search with coordinates
+        params = {"query": f"{latitude},{longitude}"}
+        response = self._make_request("/locations", params)
+        
+        stations = []
+        for location in response:
+            if location.get("type") == "STATION":
+                stations.append({
+                    "globalId": location.get("globalId"),
+                    "name": location.get("name"),
+                    "place": location.get("place"),
+                    "transportTypes": location.get("transportTypes", []),
+                    "latitude": location.get("latitude"),
+                    "longitude": location.get("longitude"),
+                    "distance": location.get("distance"),
+                })
+        
+        return stations[:10]  # Limit to 10 nearest
+    
+    def get_alerts(self, global_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get disruption messages."""
+        params = {}
+        if global_id:
+            params["globalId"] = global_id
+        
+        response = self._make_request("/messages", params)
+        alerts = []
+        
+        for alert in response:
+            alert_info = {
+                "id": alert.get("id"),
+                "title": alert.get("title"),
+                "description": alert.get("description"),
+                "validFrom": alert.get("validFrom"),
+                "validTo": alert.get("validTo"),
+                "affectedLines": alert.get("affectedLines", []),
+                "severity": alert.get("severity"),
+            }
+            alerts.append(alert_info)
+        
+        return alerts
+    
+    def get_lines(self, transport_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all lines."""
+        response = self._make_request("/lines")
+        lines = []
+        
+        for line in response:
+            line_transport_type = line.get("transportType")
+            if transport_type and line_transport_type != transport_type.upper():
+                continue
+            
+            line_info = {
+                "name": line.get("name"),
+                "label": line.get("label"),
+                "transportType": line_transport_type,
+                "network": line.get("network"),
+            }
+            lines.append(line_info)
+        
+        return lines
+    
+    def resolve_station(self, station_name: str) -> Optional[str]:
+        """Resolve station name to globalId."""
+        stations = self.search_stations(station_name)
+        if not stations:
+            return None
+        
+        # Return best match (first result)
+        return stations[0].get("globalId")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Utility Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def format_time(timestamp_ms: Optional[int]) -> str:
+    """Format Unix timestamp (ms) to local time string."""
+    if not timestamp_ms:
+        return "N/A"
+    
+    try:
+        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        return dt.strftime("%H:%M")
+    except (ValueError, OverflowError):
+        return "N/A"
+
+
+def format_datetime(timestamp_ms: Optional[int]) -> str:
+    """Format Unix timestamp (ms) to local datetime string."""
+    if not timestamp_ms:
+        return "N/A"
+    
+    try:
+        dt = datetime.fromtimestamp(timestamp_ms / 1000)
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except (ValueError, OverflowError):
+        return "N/A"
+
+
+def format_time_iso(iso_time: Optional[str]) -> str:
+    """Format ISO time string to local time string."""
+    if not iso_time:
+        return "N/A"
+    
+    try:
+        dt = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
+        return dt.strftime("%H:%M")
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def format_delay(delay_minutes: int) -> str:
+    """Format delay with color coding."""
+    if delay_minutes == 0:
+        return "pünktlich"
+    elif delay_minutes > 0:
+        color = "\033[91m" if delay_minutes > 5 else "\033[93m"  # Red if >5min, yellow otherwise
+        reset = "\033[0m"
+        return f"{color}+{delay_minutes} min{reset}"
+    else:
+        return f"{abs(delay_minutes)} min früh"
+
+
+def get_transport_emoji(transport_type: str) -> str:
+    """Get emoji for transport type."""
+    return TRANSPORT_EMOJIS.get(transport_type, "🚇")
+
+
+def clean_html(text: str) -> str:
+    """Remove HTML tags from text."""
+    import re
+    text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags
+    text = re.sub(r'&nbsp;', ' ', text)  # Replace &nbsp; with space
+    text = re.sub(r'&gt;', '>', text)   # Replace &gt; with >
+    text = re.sub(r'&lt;', '<', text)   # Replace &lt; with <
+    text = re.sub(r'&amp;', '&', text)  # Replace &amp; with &
+    return text.strip()
+
+
+def wrap_text(text: str, max_width: int = 80) -> List[str]:
+    """Wrap text to maximum width."""
+    lines = []
+    words = text.split()
+    current_line = ""
+    
+    for word in words:
+        if len(current_line + " " + word) <= max_width:
+            current_line += " " + word if current_line else word
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    
+    if current_line:
+        lines.append(current_line)
+    
+    return lines
+
+
+def print_box(title: str, content: List[str], max_width: int = 80) -> None:
+    """Print content in a Unicode box."""
+    if not content:
+        return
+    
+    # Wrap content lines
+    wrapped_content = []
+    for line in content:
+        if len(line) > max_width - 4:
+            wrapped_content.extend(wrap_text(line, max_width - 4))
+        else:
+            wrapped_content.append(line)
+    
+    # Calculate box width
+    max_line_width = max(len(title), max(len(line) for line in wrapped_content))
+    width = min(max_line_width + 4, max_width)  # Padding
+    
+    # Top border
+    print("╔" + "═" * (width - 2) + "╗")
+    
+    # Title
+    title_padding = width - len(title) - 4
+    left_pad = title_padding // 2
+    right_pad = title_padding - left_pad
+    print(f"║ {' ' * left_pad}{title}{' ' * right_pad} ║")
+    
+    # Separator
+    print("╠" + "═" * (width - 2) + "╣")
+    
+    # Content
+    for line in wrapped_content:
+        padding = width - len(line) - 4
+        print(f"║ {line}{' ' * padding} ║")
+    
+    # Bottom border
+    print("╚" + "═" * (width - 2) + "╝")
+
+
+def print_table(headers: List[str], rows: List[List[str]]) -> None:
+    """Print data as a table with Unicode borders."""
+    if not rows:
+        return
+    
+    # Calculate column widths
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            if i < len(widths):
+                widths[i] = max(widths[i], len(str(cell)))
+    
+    # Top border
+    print("┌" + "┬".join("─" * (w + 2) for w in widths) + "┐")
+    
+    # Headers
+    header_row = "│".join(f" {h:<{widths[i]}} " for i, h in enumerate(headers))
+    print("│" + header_row + "│")
+    
+    # Separator
+    print("├" + "┼".join("─" * (w + 2) for w in widths) + "┤")
+    
+    # Rows
+    for row in rows:
+        row_str = "│".join(f" {str(row[i]):<{widths[i]}} " if i < len(row) else f" {'':<{widths[i]}} " for i in range(len(widths)))
+        print("│" + row_str + "│")
+    
+    # Bottom border
+    print("└" + "┴".join("─" * (w + 2) for w in widths) + "┘")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Command Handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_search(args) -> int:
+    """Handle station search command."""
+    try:
+        api = MVGAPI()
+        stations = api.search_stations(args.query)
+        
+        if args.json:
+            print(json.dumps(stations, indent=2, ensure_ascii=False))
+            return EXIT_OK
+        
+        if not stations:
+            print(f"❌ Keine Stationen gefunden für '{args.query}'")
+            return EXIT_ERROR
+        
+        content = []
+        for station in stations[:10]:  # Limit to 10 results
+            name = station.get("name", "N/A")
+            place = station.get("place", "")
+            global_id = station.get("globalId", "N/A")
+            
+            transport_types = station.get("transportTypes", [])
+            emojis = " ".join(get_transport_emoji(t) for t in transport_types)
+            
+            location = f"{name}"
+            if place and place != name:
+                location += f", {place}"
+            
+            content.append(f"{emojis} {location}")
+            content.append(f"   ID: {global_id}")
+            
+            if station != stations[-1] and len([s for s in stations[:10] if stations.index(s) > stations.index(station)]) > 0:
+                content.append("")
+        
+        print_box(f"Stationen für '{args.query}'", content)
+        return EXIT_OK
+        
+    except MVGAPIError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"❌ API-Fehler: {e}")
+        return EXIT_API_ERROR
+
+
+def handle_departures(args) -> int:
+    """Handle departures command."""
+    try:
+        api = MVGAPI()
+        
+        # Resolve station name to globalId
+        global_id = api.resolve_station(args.station)
+        if not global_id:
+            error = f"Station '{args.station}' nicht gefunden"
+            if args.json:
+                print(json.dumps({"error": error}, indent=2))
+            else:
+                print(f"❌ {error}")
+            return EXIT_ERROR
+        
+        # Parse transport types filter
+        transport_types = None
+        if args.type:
+            type_map = {
+                "ubahn": "UBAHN",
+                "sbahn": "SBAHN", 
+                "bus": "BUS",
+                "tram": "TRAM",
+                "bahn": "BAHN",
+            }
+            transport_types = []
+            for t in args.type.split(","):
+                mapped = type_map.get(t.strip().lower())
+                if mapped:
+                    transport_types.append(mapped)
+        
+        departures = api.get_departures(
+            global_id,
+            limit=args.limit,
+            transport_types=transport_types,
+            offset_minutes=args.offset
+        )
+        
+        if args.json:
+            print(json.dumps(departures, indent=2, ensure_ascii=False))
+            return EXIT_OK
+        
+        if not departures:
+            print(f"❌ Keine Abfahrten gefunden für '{args.station}'")
+            return EXIT_ERROR
+        
+        # Prepare table data
+        headers = ["Linie", "Ziel", "Abfahrt", "Verspätung", "Gleis"]
+        rows = []
+        
+        for dep in departures:
+            emoji = get_transport_emoji(dep.get("transportType", ""))
+            label = dep.get("label", "")
+            destination = dep.get("destination", "")
+            
+            planned_time = format_time(dep.get("plannedTime"))
+            delay = format_delay(dep.get("delayMinutes", 0))
+            
+            platform = dep.get("platform", "")
+            if dep.get("platformChanged"):
+                platform += " ⚠️"
+            
+            line_info = f"{emoji} {label}"
+            if dep.get("cancelled"):
+                line_info += " ❌"
+            
+            rows.append([line_info, destination, planned_time, delay, platform])
+        
+        print()
+        print(f"📍 Abfahrten für {args.station}")
+        if args.offset > 0:
+            print(f"   (mit {args.offset} min Fußweg)")
+        print()
+        print_table(headers, rows)
+        print()
+        
+        return EXIT_OK
+        
+    except MVGAPIError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"❌ API-Fehler: {e}")
+        return EXIT_API_ERROR
+
+
+def handle_route(args) -> int:
+    """Handle route search command."""
+    try:
+        api = MVGAPI()
+        
+        # Resolve station names
+        origin_id = api.resolve_station(args.origin)
+        if not origin_id:
+            error = f"Start-Station '{args.origin}' nicht gefunden"
+            if args.json:
+                print(json.dumps({"error": error}, indent=2))
+            else:
+                print(f"❌ {error}")
+            return EXIT_ERROR
+        
+        destination_id = api.resolve_station(args.destination)
+        if not destination_id:
+            error = f"Ziel-Station '{args.destination}' nicht gefunden"
+            if args.json:
+                print(json.dumps({"error": error}, indent=2))
+            else:
+                print(f"❌ {error}")
+            return EXIT_ERROR
+        
+        # Parse time if provided
+        departure_time = None
+        if args.time:
+            try:
+                # Assume format HH:MM
+                time_parts = args.time.split(":")
+                if len(time_parts) == 2:
+                    hour, minute = int(time_parts[0]), int(time_parts[1])
+                    now = datetime.now()
+                    dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    departure_time = dt.isoformat()
+            except (ValueError, IndexError):
+                error = f"Ungültiges Zeitformat: {args.time} (erwartet HH:MM)"
+                if args.json:
+                    print(json.dumps({"error": error}, indent=2))
+                else:
+                    print(f"❌ {error}")
+                return EXIT_ERROR
+        
+        routes = api.find_routes(
+            origin_id,
+            destination_id,
+            is_arrival_time=args.arrive,
+            departure_time=departure_time
+        )
+        
+        if args.json:
+            print(json.dumps(routes, indent=2, ensure_ascii=False))
+            return EXIT_OK
+        
+        if not routes:
+            print(f"❌ Keine Verbindungen gefunden von '{args.origin}' nach '{args.destination}'")
+            return EXIT_ERROR
+        
+        print()
+        print(f"🗺️  Verbindungen: {args.origin} → {args.destination}")
+        print()
+        
+        for i, route in enumerate(routes[:5], 1):  # Show max 5 routes
+            # Extract departure and arrival times from parts if not available at route level
+            parts = route.get("parts", [])
+            
+            route_departure = route.get("departure")
+            route_arrival = route.get("arrival")
+            
+            if not route_departure and parts:
+                first_part = parts[0]
+                route_departure = first_part.get("from", {}).get("departure")
+            
+            if not route_arrival and parts:
+                last_part = parts[-1]  
+                route_arrival = last_part.get("to", {}).get("arrival")
+            
+            departure = format_time_iso(route_departure) if route_departure else "N/A"
+            arrival = format_time_iso(route_arrival) if route_arrival else "N/A"
+            
+            # Calculate duration from times if not provided
+            duration_seconds = route.get("duration", 0) or 0
+            if not duration_seconds and route_departure and route_arrival:
+                try:
+                    dep_dt = datetime.fromisoformat(route_departure.replace('Z', '+00:00'))
+                    arr_dt = datetime.fromisoformat(route_arrival.replace('Z', '+00:00'))
+                    duration_seconds = int((arr_dt - dep_dt).total_seconds())
+                except:
+                    duration_seconds = 0
+            duration = duration_seconds // 60  # Convert to minutes
+            
+            content = [f"Abfahrt: {departure} → Ankunft: {arrival} (Dauer: {duration} min)"]
+            content.append("")
+            
+            for part in route.get("parts", []):
+                line = part.get("line")
+                if line:
+                    transport_type = line.get("transportType", "")
+                    label = line.get("label", "")
+                    emoji = get_transport_emoji(transport_type)
+                    
+                    from_name = part.get("from", {}).get("name", "")
+                    to_name = part.get("to", {}).get("name", "")
+                    from_time = format_time_iso(part.get("from", {}).get("departure"))
+                    to_time = format_time_iso(part.get("to", {}).get("arrival"))
+                    
+                    content.append(f"{emoji} {label}: {from_name} ({from_time}) → {to_name} ({to_time})")
+                else:
+                    # Pedestrian part
+                    from_name = part.get("from", {}).get("name", "")
+                    to_name = part.get("to", {}).get("name", "")
+                    content.append(f"🚶 Fußweg: {from_name} → {to_name}")
+            
+            print_box(f"Verbindung {i}", content)
+            print()
+        
+        return EXIT_OK
+        
+    except MVGAPIError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"❌ API-Fehler: {e}")
+        return EXIT_API_ERROR
+
+
+def handle_nearby(args) -> int:
+    """Handle nearby stations command."""
+    try:
+        api = MVGAPI()
+        
+        # Use provided coordinates or defaults
+        lat = args.latitude if args.latitude is not None else DEFAULT_LAT
+        lon = args.longitude if args.longitude is not None else DEFAULT_LON
+        
+        stations = api.get_nearby_stations(lat, lon)
+        
+        if args.json:
+            print(json.dumps(stations, indent=2, ensure_ascii=False))
+            return EXIT_OK
+        
+        if not stations:
+            print(f"❌ Keine Stationen in der Nähe von {lat}, {lon} gefunden")
+            return EXIT_ERROR
+        
+        content = []
+        for station in stations:
+            name = station.get("name", "N/A")
+            place = station.get("place", "")
+            distance = station.get("distance")
+            
+            transport_types = station.get("transportTypes", [])
+            emojis = " ".join(get_transport_emoji(t) for t in transport_types)
+            
+            location = f"{name}"
+            if place and place != name:
+                location += f", {place}"
+            
+            distance_str = f" ({distance}m)" if distance else ""
+            content.append(f"{emojis} {location}{distance_str}")
+        
+        print_box(f"Nächste Stationen ({lat:.4f}, {lon:.4f})", content)
+        return EXIT_OK
+        
+    except MVGAPIError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"❌ API-Fehler: {e}")
+        return EXIT_API_ERROR
+
+
+def handle_alerts(args) -> int:
+    """Handle alerts/disruptions command."""
+    try:
+        api = MVGAPI()
+        
+        # Resolve station if provided
+        global_id = None
+        if args.station:
+            global_id = api.resolve_station(args.station)
+            if not global_id:
+                error = f"Station '{args.station}' nicht gefunden"
+                if args.json:
+                    print(json.dumps({"error": error}, indent=2))
+                else:
+                    print(f"❌ {error}")
+                return EXIT_ERROR
+        
+        alerts = api.get_alerts(global_id)
+        
+        if args.json:
+            print(json.dumps(alerts, indent=2, ensure_ascii=False))
+            return EXIT_OK
+        
+        if not alerts:
+            location_str = f" für {args.station}" if args.station else ""
+            print(f"✅ Keine Störungen{location_str} gemeldet")
+            return EXIT_OK
+        
+        title = f"Störungsmeldungen"
+        if args.station:
+            title += f" für {args.station}"
+        
+        content = []
+        for alert in alerts:
+            title_text = alert.get("title", "Unbekannte Störung")
+            description = clean_html(alert.get("description", ""))
+            severity = alert.get("severity", "")
+            
+            valid_from = format_datetime(alert.get("validFrom"))
+            valid_to = format_datetime(alert.get("validTo"))
+            
+            affected_lines = alert.get("affectedLines", [])
+            lines_str = ", ".join(affected_lines) if affected_lines else "Alle Linien"
+            
+            severity_emoji = "🔴" if severity == "HIGH" else "🟡" if severity == "MEDIUM" else "🔵"
+            
+            content.append(f"{severity_emoji} {title_text}")
+            if description:
+                content.append(f"   {description}")
+            content.append(f"   Betroffene Linien: {lines_str}")
+            content.append(f"   Gültig: {valid_from} - {valid_to}")
+            
+            if alert != alerts[-1]:
+                content.append("")
+        
+        print_box(title, content)
+        return EXIT_OK
+        
+    except MVGAPIError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"❌ API-Fehler: {e}")
+        return EXIT_API_ERROR
+
+
+def handle_lines(args) -> int:
+    """Handle lines listing command."""
+    try:
+        api = MVGAPI()
+        
+        # Parse transport type filter
+        transport_type = None
+        if args.type:
+            type_map = {
+                "ubahn": "UBAHN",
+                "sbahn": "SBAHN",
+                "bus": "BUS", 
+                "tram": "TRAM",
+                "bahn": "BAHN",
+            }
+            transport_type = type_map.get(args.type.lower())
+            if not transport_type:
+                error = f"Unbekannter Verkehrsmitteltyp: {args.type}"
+                if args.json:
+                    print(json.dumps({"error": error}, indent=2))
+                else:
+                    print(f"❌ {error}")
+                return EXIT_ERROR
+        
+        lines = api.get_lines(transport_type)
+        
+        if args.json:
+            print(json.dumps(lines, indent=2, ensure_ascii=False))
+            return EXIT_OK
+        
+        if not lines:
+            type_str = f" ({args.type})" if args.type else ""
+            print(f"❌ Keine Linien{type_str} gefunden")
+            return EXIT_ERROR
+        
+        # Group by transport type
+        grouped_lines = {}
+        for line in lines:
+            t_type = line.get("transportType", "UNKNOWN")
+            if t_type not in grouped_lines:
+                grouped_lines[t_type] = []
+            grouped_lines[t_type].append(line)
+        
+        print()
+        for t_type, type_lines in grouped_lines.items():
+            emoji = get_transport_emoji(t_type)
+            
+            content = []
+            for line in sorted(type_lines, key=lambda x: x.get("label", "")):
+                label = line.get("label", "")
+                name = line.get("name", "")
+                network = line.get("network", "")
+                
+                line_str = f"{label}"
+                if name and name != label:
+                    line_str += f" - {name}"
+                if network:
+                    line_str += f" ({network})"
+                
+                content.append(line_str)
+            
+            print_box(f"{emoji} {t_type} Linien", content)
+            print()
+        
+        return EXIT_OK
+        
+    except MVGAPIError as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}, indent=2))
+        else:
+            print(f"❌ API-Fehler: {e}")
+        return EXIT_API_ERROR
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI Setup
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create the argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="mvg",
+        description="Münchner Verkehrsgesellschaft (MVG) CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    
+    # Global options
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Ausgabe als JSON"
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Verfügbare Commands")
+    
+    # Search command
+    search_parser = subparsers.add_parser("search", help="Station suchen")
+    search_parser.add_argument("query", help="Suchbegriff für Station")
+    
+    # Departures command  
+    dep_parser = subparsers.add_parser("departures", help="Abfahrten anzeigen")
+    dep_parser.add_argument("station", help="Stationsname")
+    dep_parser.add_argument("--limit", type=int, default=10, help="Anzahl Abfahrten (default: 10)")
+    dep_parser.add_argument("--type", help="Verkehrsmittel-Filter (z.B. ubahn,sbahn,bus,tram)")
+    dep_parser.add_argument("--offset", type=int, default=0, help="Fußweg-Offset in Minuten")
+    
+    # Route command
+    route_parser = subparsers.add_parser("route", help="Verbindung suchen")
+    route_parser.add_argument("origin", help="Start-Station")
+    route_parser.add_argument("destination", help="Ziel-Station")
+    route_parser.add_argument("--arrive", action="store_true", help="Zeit als Ankunftszeit verwenden")
+    route_parser.add_argument("--time", help="Bestimmte Zeit (HH:MM)")
+    
+    # Nearby command
+    nearby_parser = subparsers.add_parser("nearby", help="Nächste Stationen")
+    nearby_parser.add_argument("latitude", nargs="?", type=float, help="Breitengrad (default: Lars' Position)")
+    nearby_parser.add_argument("longitude", nargs="?", type=float, help="Längengrad")
+    
+    # Alerts command
+    alerts_parser = subparsers.add_parser("alerts", help="Störungsmeldungen")
+    alerts_parser.add_argument("--station", help="Stationsspezifische Störungen")
+    
+    # Lines command
+    lines_parser = subparsers.add_parser("lines", help="Linien auflisten")
+    lines_parser.add_argument("--type", help="Verkehrsmittel-Filter (ubahn, sbahn, bus, tram, bahn)")
+    
+    return parser
+
+
+def main() -> int:
+    """Main entry point."""
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return EXIT_ERROR
+    
+    # Route to appropriate handler
+    handlers = {
+        "search": handle_search,
+        "departures": handle_departures,
+        "route": handle_route,
+        "nearby": handle_nearby,
+        "alerts": handle_alerts,
+        "lines": handle_lines,
+    }
+    
+    handler = handlers.get(args.command)
+    if not handler:
+        print(f"❌ Unbekannter Command: {args.command}")
+        return EXIT_ERROR
+    
+    try:
+        return handler(args)
+    except KeyboardInterrupt:
+        print("\n❌ Abgebrochen")
+        return EXIT_ERROR
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"error": f"Unerwarteter Fehler: {e}"}, indent=2))
+        else:
+            print(f"❌ Unerwarteter Fehler: {e}")
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())
