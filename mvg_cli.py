@@ -157,13 +157,14 @@ class MVGAPI:
         if offset_minutes > 0:
             params["offsetInMinutes"] = str(offset_minutes)
         
+        if transport_types:
+            params["transportTypes"] = ",".join(transport_types)
+        
         response = self._make_request("/departures", params)
         departures = []
         
         for dep in response:
             transport_type = dep.get("transportType")
-            if transport_types and transport_type not in transport_types:
-                continue
             
             planned_time = dep.get("plannedDepartureTime")
             realtime_time = dep.get("realtimeDepartureTime")
@@ -278,22 +279,20 @@ class MVGAPI:
     
     def get_nearby_stations(self, latitude: float, longitude: float) -> List[Dict[str, Any]]:
         """Get stations near given coordinates."""
-        # Use location search with coordinates
-        params = {"query": f"{latitude},{longitude}"}
-        response = self._make_request("/locations", params)
+        params = {"latitude": str(latitude), "longitude": str(longitude)}
+        response = self._make_request("/stations/nearby", params)
         
         stations = []
         for location in response:
-            if location.get("type") == "STATION":
-                stations.append({
-                    "globalId": location.get("globalId"),
-                    "name": location.get("name"),
-                    "place": location.get("place"),
-                    "transportTypes": location.get("transportTypes", []),
-                    "latitude": location.get("latitude"),
-                    "longitude": location.get("longitude"),
-                    "distance": location.get("distance"),
-                })
+            stations.append({
+                "globalId": location.get("globalId"),
+                "name": location.get("name"),
+                "place": location.get("place"),
+                "transportTypes": location.get("transportTypes", []),
+                "latitude": location.get("latitude"),
+                "longitude": location.get("longitude"),
+                "distanceInMeters": location.get("distanceInMeters"),
+            })
         
         return stations[:10]  # Limit to 10 nearest
     
@@ -391,15 +390,14 @@ def format_time_iso(iso_time: Optional[str]) -> str:
 
 
 def format_delay(delay_minutes: int) -> str:
-    """Format delay with color coding."""
+    """Format delay with emoji indicators."""
     if delay_minutes == 0:
-        return "pünktlich"
+        return "✅ pünktlich"
     elif delay_minutes > 0:
-        color = "\033[91m" if delay_minutes > 5 else "\033[93m"  # Red if >5min, yellow otherwise
-        reset = "\033[0m"
-        return f"{color}+{delay_minutes} min{reset}"
+        indicator = "🔴" if delay_minutes > 5 else "🟡"
+        return f"{indicator} +{delay_minutes} min"
     else:
-        return f"{abs(delay_minutes)} min früh"
+        return f"⏩ {abs(delay_minutes)} min früh"
 
 
 def get_transport_emoji(transport_type: str) -> str:
@@ -780,7 +778,7 @@ def handle_nearby(args) -> int:
         for station in stations:
             name = station.get("name", "N/A")
             place = station.get("place", "")
-            distance = station.get("distance")
+            distance = station.get("distanceInMeters")
             
             transport_types = station.get("transportTypes", [])
             emojis = " ".join(get_transport_emoji(t) for t in transport_types)
