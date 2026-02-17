@@ -14,13 +14,24 @@ Eine inoffizielle Command-Line-Interface für die Münchner Verkehrsgesellschaft
 ## Installation
 
 ```bash
-# Mit uv (empfohlen)
-uv sync
-uv run mvg_cli.py --help
+# Repository klonen
+git clone https://github.com/Lars147/mvg-cli.git
+cd mvg-cli
 
-# Oder mit pip
+# Ausführbar machen
+chmod +x mvg_cli.py
+
+# Option A: Alias setzen (in ~/.bashrc oder ~/.zshrc)
+alias mvg="python3 /pfad/zu/mvg_cli.py"
+
+# Option B: Ins PATH kopieren
+sudo cp mvg_cli.py /usr/local/bin/mvg
+```
+
+**Voraussetzungen:** Python 3.9+ und `requests`
+
+```bash
 pip install requests
-python3 mvg_cli.py --help
 ```
 
 ## Nutzung
