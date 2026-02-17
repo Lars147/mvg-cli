@@ -221,7 +221,8 @@ class MVGAPI:
         transport_types: Optional[List[str]] = None,
         routing_mode: str = "FAST",
         walk_speed: str = "NORMAL",
-        accessible: bool = False
+        accessible: bool = False,
+        via: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Find routes between two locations (stations or addresses)."""
         params = {}
@@ -257,6 +258,13 @@ class MVGAPI:
         
         if accessible:
             params["wheelchair"] = "true"
+        
+        if via:
+            if via.get("globalId"):
+                params["viaStationGlobalId"] = via["globalId"]
+            else:
+                params["viaLatitude"] = via["latitude"]
+                params["viaLongitude"] = via["longitude"]
         
         response = self._make_request("/routes", params)
         routes = []
@@ -682,6 +690,18 @@ def handle_route(args) -> int:
                 print(f"❌ {error}")
             return EXIT_ERROR
         
+        # Resolve via stop if provided
+        via_loc = None
+        if args.via:
+            via_loc = api.resolve_location(args.via)
+            if not via_loc:
+                error = f"Zwischenstopp '{args.via}' nicht gefunden"
+                if args.json:
+                    print(json.dumps({"error": error}, indent=2))
+                else:
+                    print(f"❌ {error}")
+                return EXIT_ERROR
+        
         # Parse time if provided
         departure_time = None
         if args.time:
@@ -722,7 +742,8 @@ def handle_route(args) -> int:
             transport_types=transport_types,
             routing_mode=mode_map.get(args.mode, "FAST"),
             walk_speed=speed_map.get(args.walk_speed, "NORMAL"),
-            accessible=args.accessible
+            accessible=args.accessible,
+            via=via_loc
         )
         
         if args.json:
@@ -734,7 +755,8 @@ def handle_route(args) -> int:
             return EXIT_ERROR
         
         print()
-        print(f"🗺️  Verbindungen: {args.origin} → {args.destination}")
+        via_str = f" via {args.via}" if args.via else ""
+        print(f"🗺️  Verbindungen: {args.origin}{via_str} → {args.destination}")
         print()
         
         for i, route in enumerate(routes[:5], 1):  # Show max 5 routes
@@ -1005,8 +1027,9 @@ def create_parser() -> argparse.ArgumentParser:
     
     # Route command
     route_parser = subparsers.add_parser("route", help="Verbindung suchen")
-    route_parser.add_argument("origin", help="Start-Station")
-    route_parser.add_argument("destination", help="Ziel-Station")
+    route_parser.add_argument("origin", help="Start (Station oder Adresse)")
+    route_parser.add_argument("destination", help="Ziel (Station oder Adresse)")
+    route_parser.add_argument("--via", help="Zwischenstopp (Station oder Adresse)")
     route_parser.add_argument("--arrive", action="store_true", help="Zeit als Ankunftszeit verwenden")
     route_parser.add_argument("--time", help="Bestimmte Zeit (HH:MM)")
     route_parser.add_argument("--type", help="Nur bestimmte Verkehrsmittel (z.B. ubahn,sbahn)")
