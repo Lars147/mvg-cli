@@ -1,0 +1,12 @@
+[project]
+name = "mvg-cli"
+version = "0.1.0"
+description = "CLI für die Münchner Verkehrsgesellschaft (MVG) - Abfahrten, Verbindungen, Störungen"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28",
+]
+
+[project.scripts]
+mvg = "mvg_cli:main"

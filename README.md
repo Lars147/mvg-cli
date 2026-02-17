@@ -14,10 +14,12 @@ Eine inoffizielle Command-Line-Interface für die Münchner Verkehrsgesellschaft
 ## Installation
 
 ```bash
-# Dependencies: nur Python stdlib + requests
-pip install requests
+# Mit uv (empfohlen)
+uv sync
+uv run mvg_cli.py --help
 
-# CLI verwenden
+# Oder mit pip
+pip install requests
 python3 mvg_cli.py --help
 ```
 
