@@ -13,7 +13,7 @@ Nutzung:
     mvg route "Marienplatz" "Garching"           # Verbindungssuche  
     mvg route "Marienplatz" "Garching" --arrive  # Ankunftszeit
     mvg route "Marienplatz" "Garching" --time "18:00"  # Bestimmte Zeit
-    mvg nearby                                   # Nächste Stationen (Default: Lars' Position)
+    mvg nearby                                   # Nächste Stationen (Default-Position)
     mvg nearby 48.1351 11.5820                   # Bestimmte Koordinaten
     mvg alerts                                   # Aktuelle Störungen
     mvg alerts --station "Marienplatz"          # Stationsspezifische Störungen
@@ -74,7 +74,7 @@ TRANSPORT_TYPE_MAP = {
     "ruftaxi": "RUFTAXI", "rufbus": "RUFTAXI",
 }
 
-# Default location (Lars' position in Munich)
+# Default location (Munich)
 DEFAULT_LAT = 48.1351
 DEFAULT_LON = 11.5820
 
@@ -1325,7 +1325,7 @@ def create_parser() -> argparse.ArgumentParser:
     
     # Nearby command
     nearby_parser = subparsers.add_parser("nearby", help="Nächste Stationen")
-    nearby_parser.add_argument("latitude", nargs="?", type=float, help="Breitengrad (default: Lars' Position)")
+    nearby_parser.add_argument("latitude", nargs="?", type=float, help="Breitengrad")
     nearby_parser.add_argument("longitude", nargs="?", type=float, help="Längengrad")
     
     # Alerts command
